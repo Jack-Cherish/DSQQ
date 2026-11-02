@@ -1,0 +1,8 @@
+downloads/
+.tmp/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.superpowers/
+.DS_Store

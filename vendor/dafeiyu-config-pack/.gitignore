@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+回答.json
+*.txt.local
+voice/breeze/

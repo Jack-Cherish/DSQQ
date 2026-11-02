@@ -1,0 +1,15 @@
+[
+ {
+  "index": "prompt",
+  "language": "Mandarin",
+  "time": [
+   0,
+   6300
+  ],
+  "duration": "0.200 0.360 0.040 0.280 0.200 0.360 0.280 0.440 0.360 0.200 0.240 0.120 0.160 0.240 0.240 0.160 0.480 0.200 0.160 0.240 0.160 0.120 0.160 0.200 0.200 0.160 0.200 0.080 0.060",
+  "text": "今 天 天 气 好 好 哦 <SP> 本 鲸 想 出 去 晒 太 阳 <SP> 顺 便 再 买 一 根 草 莓 冰 淇 淋 <SP>",
+  "phoneme": "zh_jin1 zh_tian1 zh_tian1 zh_qi4 zh_hao3 zh_hao3 zh_o4 <SP> zh_ben3 zh_jing1 zh_xiang3 zh_chu1 zh_qu4 zh_shai4 zh_tai4 zh_yang2 <SP> zh_shun4 zh_bian4 zh_zai4 zh_mai3 zh_yi4 zh_gen1 zh_cao3 zh_mei2 zh_bing1 zh_qi2 zh_lin2 <SP>",
+  "note_pitch": "66 67 68 66 57 68 65 0 61 65 63 67 69 69 70 62 0 64 64 63 64 59 63 66 59 69 69 64 0",
+  "note_type": "2 2 2 2 2 2 2 1 2 2 2 2 2 2 2 2 1 2 2 2 2 2 2 2 2 2 2 2 1"
+ }
+]

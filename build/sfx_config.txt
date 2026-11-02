@@ -1,0 +1,4 @@
+;!@Install@!UTF-8!
+Title="大肥鱼一键包"
+RunProgram="runtime\\python\\pythonw.exe app\\main.py"
+;!@InstallEnd@!
