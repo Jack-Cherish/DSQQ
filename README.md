@@ -10,7 +10,7 @@
 
 ## 下载
 
-到 [Releases](../../releases/latest) 下载 `大肥鱼一键包.exe`（约 790 MB）。
+到 [Releases](../../releases/latest) 下载 `DaFeiYu-OneClick-v1.0.0.exe`（约 790 MB）。GitHub 不支持中文文件名，所以用了英文名，下载后改不改名都能用。
 
 下载后可以核对 sha256，确认文件完整、没被改过：
 
@@ -18,7 +18,7 @@
 e60514b76d0397d3a3f07d04631dd422b0ba72e46eb72a849e713f64d5896fdd
 ```
 
-Windows 里在 PowerShell 运行 `Get-FileHash .\大肥鱼一键包.exe` 就能看到。
+在 PowerShell 里运行 `Get-FileHash .\DaFeiYu-OneClick-v1.0.0.exe` 就能看到。
 
 ## 系统要求
 
@@ -40,7 +40,7 @@ Windows 里在 PowerShell 运行 `Get-FileHash .\大肥鱼一键包.exe` 就能�
 
 ## 安装步骤
 
-1. **双击 `大肥鱼一键包.exe`**。弹出「Windows 已保护你的电脑」时，点「更多信息」→「仍要运行」。exe 没有数字签名，所以会有这个提示。
+1. **双击下载的 exe**。弹出「Windows 已保护你的电脑」时，点「更多信息」→「仍要运行」。exe 没有数字签名，所以会有这个提示。
 2. **选安装位置**，点「开始安装」。从这一步起后台就开始装了，你填后面几页的时候它一直在跑。
 3. **填信息**：大号 QQ、DeepSeek key、豆包 APP ID 和 Access Token、硅基流动 key。每填一项就马上检查，打勾才算对。填错了会告诉你是 key 不对、余额不够，还是豆包没领试用。
 4. **个性化**（可以跳过）：改名字、改性格、写一句话描述她的声音并试听、选表情包，也可以加你自己的图。
