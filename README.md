@@ -10,15 +10,15 @@
 
 ## 下载
 
-到 [Releases](../../releases/latest) 下载 `DaFeiYu-OneClick-v1.0.0.exe`（约 790 MB）。GitHub 不支持中文文件名，所以用了英文名，下载后改不改名都能用。
+到 [Releases](../../releases/latest) 下载 `DaFeiYu-OneClick-v1.2.0.exe`（约 790 MB）。GitHub 不支持中文文件名，所以用了英文名，下载后改不改名都能用。
 
 下载后可以核对 sha256，确认文件完整、没被改过：
 
 ```
-e60514b76d0397d3a3f07d04631dd422b0ba72e46eb72a849e713f64d5896fdd
+fc3349717693b72d7e0f0a75a71316ec6f8ba81201e9404cc2646959e85f3d39
 ```
 
-在 PowerShell 里运行 `Get-FileHash .\DaFeiYu-OneClick-v1.0.0.exe` 就能看到。
+在 PowerShell 里运行 `Get-FileHash .\DaFeiYu-OneClick-v1.2.0.exe` 就能看到。
 
 ## 系统要求
 
@@ -34,7 +34,7 @@ e60514b76d0397d3a3f07d04631dd422b0ba72e46eb72a849e713f64d5896fdd
 | 你自己的 QQ 大号 | 她只认这个号是主人 |
 | DeepSeek API key | 她用来想事情、说话 |
 | 豆包语音的 APP ID 和 Access Token（火山引擎） | 发语音、唱歌 |
-| 硅基流动 API key | 长期记忆 |
+| 硅基流动 API key（可选） | 长期记忆。填信息时打开「长期记忆」才需要 |
 
 每一项在安装界面里都有「去哪申请」，点开有图文说明。
 
@@ -115,7 +115,12 @@ app/                向导和状态页程序
   personalize.py    把名字、性格、声音、表情包写进配置包
   store.py          state.json 读写，key 用 DPAPI 加密
   shortcut.py       创建桌面快捷方式
-  uninstall.py      卸载
+  official_binding.py  QQ 官方 bot 模式：私聊绑定主人时的本机确认
+  diagnostics.py    本机诊断和受限修复
+  safe_logging.py   排障日志：先脱敏再限量写入
+  log_capture.py    独立的日志读取进程，向导退出后继续收集服务输出
+  fileio.py         先完整写临时文件再替换，避免配置写坏
+  uninstall.py      卸载（实际删除由 uninstall.ps1 完成）
   web/              前端页面和图片
 build/
   build.py          打包脚本，产出 dist/大肥鱼一键包.exe
