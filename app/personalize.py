@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+from fileio import atomic_write_text
+
 DEFAULT_NAME = "大肥鱼"
 VOICE_PRESETS = [
     ("甜妹", "一个憨萌软糯的小女生，声音甜甜的、有点奶，十几岁的感觉，嘴馋爱撒娇，带一点小傲娇"),
@@ -66,8 +68,6 @@ def apply_profile(pack_dir: Path, profile: dict) -> None:
     if "{OWNER_QQ}" not in persona:
         # 导入工具靠这个占位写入主人 QQ；用户删了就补回来，不然她认不出主人
         persona += "\n\n主人的 QQ 号是 {OWNER_QQ}。消息里的 User ID 是这个号，才是主人本人。"
-    (pack_dir / PERSONA).write_text(persona + "\n", encoding="utf-8")
-
     pack = _read_json(pack_dir / PACK_JSON)
     pack["voice"]["doubao"]["persona"] = voice
     first = True
@@ -76,18 +76,20 @@ def apply_profile(pack_dir: Path, profile: dict) -> None:
         # 主套必须是开着的那一套（导入工具把 default 那套设为默认规则的第一套）
         m["default"] = m["use"] and first
         first = first and not m["use"]
-    (pack_dir / PACK_JSON).write_text(json.dumps(pack, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(pack_dir / PERSONA, persona + "\n", backup=True)
+    atomic_write_text(pack_dir / PACK_JSON, json.dumps(pack, ensure_ascii=False, indent=2), backup=True)
 
 
 def write_answers(path: Path, *, base_url: str, username: str, password: str, owner_qq: str,
-                  secrets_dir: Path, sf_key: str, app_id: str, token: str) -> None:
+                  secrets_dir: Path, sf_key: str, app_id: str, token: str,
+                  memory: str = "2", voice: str = "3", platform: str = "napcat") -> None:
     """密码和 key 写成单独的小文件（导入工具的 *_file 用法），回答文件本身不含明文。调用方用完删 secrets_dir。"""
     secrets_dir.mkdir(parents=True, exist_ok=True)
     files = {}
     for name, value in (("password", password), ("siliconflow_key", sf_key), ("volc_access_token", token)):
         f = secrets_dir / f"{name}.txt"
-        f.write_text(value, encoding="utf-8")
+        atomic_write_text(f, value)
         files[f"{name}_file"] = str(f)
     answers = {"base_url": base_url, "username": username, "owner_qq": owner_qq,
-               "memory": "2", "voice": "3", "volc_app_id": app_id, **files}
-    path.write_text(json.dumps(answers, ensure_ascii=False, indent=2), encoding="utf-8")
+               "memory": memory, "voice": voice, "platform": platform, "volc_app_id": app_id, **files}
+    atomic_write_text(path, json.dumps(answers, ensure_ascii=False, indent=2))

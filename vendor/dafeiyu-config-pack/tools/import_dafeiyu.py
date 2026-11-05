@@ -120,6 +120,21 @@ class Api:
         return False
 
 
+def choose_platform(cfg, mode):
+    kind = "qq_official" if mode == "official" else "aiocqhttp"
+    platforms = [p for p in cfg.get("platform", []) if p.get("type") == kind]
+    platforms.sort(key=lambda p: not p.get("enable", True))
+    return platforms[0] if platforms else None
+
+
+def unsupported_plugins(mode):
+    if mode != "official":
+        return set()
+    return {"astrbot_plugin_group_chat_plus", "astrbot_plugin_qzone",
+            "astrbot_plugin_qqprofile", "astrbot_plugin_proactive_chat",
+            "astrbot_plugin_dafeiyu_signature"}
+
+
 def get_path(d, dotted):
     for k in dotted.split("."):
         if not isinstance(d, dict) or k not in d:
@@ -314,11 +329,66 @@ def multipart(field, filename, payload):
     return head + payload + tail, f"multipart/form-data; boundary={boundary}"
 
 
+def bind_owner(api, pack, owner):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", owner) or owner == "DAFEIYU_UNBOUND_OWNER":
+        raise ValueError("主人身份无效")
+
+    def checked(method, path, body=None):
+        result = api.call(method, path, body, timeout=30)
+        if not api.ok(result):
+            raise RuntimeError("保存主人资料失败，请重试绑定；详情见后台日志。")
+        return result.get("data")
+
+    def replace(value):
+        if isinstance(value, str):
+            return value.replace("DAFEIYU_UNBOUND_OWNER", owner)
+        if isinstance(value, list):
+            return [replace(v) for v in value]
+        if isinstance(value, dict):
+            return {k: replace(v) for k, v in value.items()}
+        return value
+
+    data = checked("GET", "/config-profiles/default")
+    cfg = data.get("config") if isinstance(data, dict) else None
+    platform = choose_platform(cfg, "official") if isinstance(cfg, dict) else None
+    if not platform:
+        raise RuntimeError("找不到 QQ 官方机器人配置，请返回检查安装。")
+    pid = urllib.parse.quote(pack["persona"]["id"], safe="")
+    persona = checked("GET", f"/personas/{pid}")
+    if not isinstance(persona, dict) or not isinstance(persona.get("system_prompt"), str):
+        raise RuntimeError("主人绑定前尚未完成人设导入，请重试安装。")
+    prompt = replace(persona["system_prompt"])
+    if prompt != persona["system_prompt"]:
+        checked("PUT", f"/personas/{pid}", {"system_prompt": prompt})
+    for plugin in pack["plugins"]:
+        if plugin["name"] in unsupported_plugins("official") or "{主人会话}" not in json.dumps(plugin.get("config", {}), ensure_ascii=False):
+            continue
+        data = checked("GET", "/plugins/config?plugin_id=" + urllib.parse.quote(plugin["name"]))
+        conf = data.get("config") if isinstance(data, dict) else None
+        if not isinstance(conf, dict):
+            raise RuntimeError("无法读取主人相关插件配置，请重试绑定。")
+        updated = replace(conf)
+        if updated != conf:
+            checked("PUT", "/plugins/config", {"plugin_id": plugin["name"], "config": updated})
+            checked("POST", "/plugins/reload", {"plugin_id": plugin["name"]})
+    settings = cfg.setdefault("platform_settings", {})
+    settings["id_whitelist"] = replace(settings.get("id_whitelist", []))
+    session = f"{platform['id']}:FriendMessage:{owner}"
+    if session not in settings["id_whitelist"]:
+        settings["id_whitelist"].append(session)
+    settings["enable_id_white_list"] = True
+    if owner not in cfg.setdefault("admins_id", []):
+        cfg["admins_id"].append(owner)
+    checked("PUT", "/config-profiles/default", cfg)
+
+
 def main():
     global ANSWERS
     if "--answers" in sys.argv:
-        ANSWERS = json.load(open(sys.argv[sys.argv.index("--answers") + 1], encoding="utf-8-sig"))
-    pack = json.load(open(os.path.join(PACK, "settings", "pack.json"), encoding="utf-8-sig"))
+        with open(sys.argv[sys.argv.index("--answers") + 1], encoding="utf-8-sig") as answer_file:
+            ANSWERS = json.load(answer_file)
+    with open(os.path.join(PACK, "settings", "pack.json"), encoding="utf-8-sig") as pack_file:
+        pack = json.load(pack_file)
     say("大肥鱼配置包导入工具")
     say("开始前确认：AstrBot 已经在运行，QQ 小号已经通过 NapCat 接上，DeepSeek 已经能正常回话。")
 
@@ -329,9 +399,20 @@ def main():
     if not api.login(user, password):
         sys.exit("登录失败：检查后台地址、账号、密码。")
     say("  已登录后台")
+    if "--bind-only" in sys.argv:
+        if ANSWERS.get("platform") != "official":
+            raise ValueError("仅官方机器人支持安装后绑定")
+        bind_owner(api, pack, ANSWERS.get("owner_qq", ""))
+        RESULTS.append(("绑定主人", True))
+        say("  主人资料已保存，QQ 连接保持在线")
+        return
 
-    owner = ask("owner_qq", "你自己的 QQ 号（大号，她会把它当主人）")
-    if not owner.isdigit():
+    mode = ANSWERS.get("platform", "napcat")
+    owner = ask("owner_qq", "你的官方机器人私聊 OpenID" if mode == "official" else "你自己的 QQ 号（大号，她会把它当主人）")
+    if mode == "official":
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", owner):
+            sys.exit("官方机器人需要私聊用户 OpenID，不能使用普通 QQ 号。")
+    elif not owner.isdigit():
         sys.exit("QQ 号只能是数字")
     say("\n记忆二选一：1 本机 Ollama（免费，要先装 Ollama）  2 硅基流动（要一个硅基流动的 key）  0 先不装")
     memory = ask("memory", "选", "2", choices=["0", "1", "2"])
@@ -351,11 +432,10 @@ def main():
     if not isinstance(cfg, dict):
         sys.exit(f"读不到配置：{api.msg(r)}")
 
-    platforms = [p for p in cfg.get("platform", []) if p.get("type") == "aiocqhttp"]
-    platforms.sort(key=lambda p: not p.get("enable", True))
-    if not platforms:
-        sys.exit("后台里还没有 QQ 机器人（OneBot v11），先按视频接好 NapCat 再来。")
-    platform_id = platforms[0]["id"]
+    platform = choose_platform(cfg, mode)
+    if not platform:
+        sys.exit("后台中没有与所选接入方式相符的 QQ 机器人。")
+    platform_id = platform["id"]
     chat_id = get_path(cfg, "agent_runner.config.model.provider_id") or ""
     if not chat_id:
         chats = [p for p in cfg.get("provider", []) if p.get("provider_type", "chat_completion") == "chat_completion" and p.get("enable", True)]
@@ -366,6 +446,8 @@ def main():
     ctx = {"主人会话": session, "对话模型": chat_id, "唱歌后端": (pack.get("sing") or {}).get("backend") or "doubao"}
     say(f"  机器人：{platform_id}　对话模型：{chat_id}")
     results = RESULTS
+    blocked = unsupported_plugins(mode)
+    pack["plugins"] = [p for p in pack["plugins"] if p["name"] not in blocked]
 
     # ---------- 对话模型：关思考，回得快 ----------
     step("调整对话模型")
@@ -382,7 +464,12 @@ def main():
     # ---------- 人格 ----------
     step("写入人格「大肥鱼」")
     pid = pack["persona"]["id"]
-    text = open(os.path.join(PACK, pack["persona"]["file"]), encoding="utf-8-sig").read().replace("{OWNER_QQ}", owner)
+    with open(os.path.join(PACK, pack["persona"]["file"]), encoding="utf-8-sig") as persona_file:
+        text = persona_file.read()
+    if mode == "official":
+        text = text.replace("主人的 QQ 号是 {OWNER_QQ}。消息里的 User ID 是这个号，才是主人本人。",
+                            "主人的官方机器人私聊用户 OpenID 是 {OWNER_QQ}。只有这个身份才是主人本人。")
+    text = text.replace("{OWNER_QQ}", owner)
     qid = urllib.parse.quote(pid, safe="")
     cur = api.call("GET", f"/personas/{qid}")
     if api.ok(cur) and isinstance(cur.get("data"), dict) and cur["data"].get("persona_id") == pid:
@@ -397,6 +484,9 @@ def main():
     # ---------- 插件 ----------
     step("从插件市场安装插件（第一次要下载，慢的话等一两分钟）")
     installed = {p.get("name") for p in (api.call("GET", "/plugins").get("data") or []) if isinstance(p, dict)}
+    for name in sorted(blocked & installed):
+        ok = api.ok(api.call("PATCH", "/plugins/enabled", {"plugin_id": name, "enabled": False}))
+        results.append((f"关闭不兼容插件 {name}", ok))
     for p in pack["plugins"]:
         if p["name"] in installed:
             say(f"  {p['name']}：已装过")
@@ -417,6 +507,8 @@ def main():
         meta_path = base + ".json"
         meta = json.load(open(meta_path, encoding="utf-8-sig")) if os.path.exists(meta_path) else {}
         name = meta.get("name") or plugin_name(z) or os.path.basename(base)
+        if name in blocked:
+            continue
         if meta.get("only_with_voice") and meta["only_with_voice"] != voice and name not in installed:
             continue
         if name in installed and not meta.get("always_reinstall"):
@@ -457,7 +549,7 @@ def main():
         r = api.call("PATCH", f"/tools/{urllib.parse.quote(tool, safe='')}/permission", {"permission": perm})
         if not api.ok(r):
             warn(f"工具 {tool} 权限没改成：{api.msg(r)}")
-    say("  发空间、改签名只听主人的：已设置")
+    say("  工具权限已检查" if mode == "official" else "  发空间、改签名只听主人的：已设置")
 
     # ---------- 表情包 ----------
     step("下载表情包（从表情包插件的资源广场下，几百张图，要一会儿）")
@@ -649,7 +741,7 @@ def main():
         if session not in wl and owner not in wl:
             wl.append(session)
     admins = cfg.setdefault("admins_id", [])
-    if owner not in admins:
+    if owner != "DAFEIYU_UNBOUND_OWNER" and owner not in admins:
         admins.append(owner)
     tts = cfg.setdefault("provider_tts_settings", {})
     if tts_id and voice == "3" and v["doubao"].get("whole_reply", True):

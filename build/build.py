@@ -6,11 +6,12 @@ import argparse
 import hashlib
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 PYTHON = "3.12.10"
 ASTRBOT = "4.29.3"
@@ -35,9 +36,9 @@ def sfx_config_text() -> str:
 
 
 def scan_for_secrets(root: Path, needles: list[str]) -> list[Path]:
-    """返回含任一敏感串的 json 文件。"""
+    """返回含任一敏感串的 JSON 文件及其备份。"""
     needles = [n for n in needles if n]
-    return sorted(p for p in Path(root).rglob("*.json")
+    return sorted(p for p in Path(root).rglob("*") if p.is_file() and p.name.endswith((".json", ".json.bak"))
                   if any(n in p.read_text(encoding="utf-8", errors="ignore") for n in needles))
 
 
@@ -55,15 +56,44 @@ def download(dl: Path, skip: bool) -> None:
 
 def unzip(src: Path, dest: Path) -> None:
     """解压；压缩包只有一个顶层目录时去掉这一层。"""
+    dest = Path(dest).absolute()
+    if dest.is_symlink() or dest.is_junction():
+        raise ValueError(f"解压目录不能是链接：{dest}")
+    base = dest.resolve()
     with zipfile.ZipFile(src) as z:
-        names = [n for n in z.namelist() if n.strip("/")]
-        tops = {n.split("/", 1)[0] for n in names}
-        strip = len(tops) == 1 and all("/" in n for n in names)
+        entries = []
         for info in z.infolist():
-            rel = info.filename.split("/", 1)[1] if strip else info.filename
-            if not rel or info.is_dir():
-                continue
-            out = dest / rel
+            name = info.filename.replace("\\", "/")
+            parts = name.rstrip("/").split("/")
+            mode = stat.S_IFMT(info.external_attr >> 16)
+            if (info.orig_filename != info.filename or name.startswith("/")
+                    or any(p in ("", ".", "..") or p.endswith((".", " "))
+                           or PureWindowsPath(p).is_reserved()
+                           or any(ord(c) < 32 or c in ':<>"|?*' for c in p) for p in parts)
+                    or mode not in (0, stat.S_IFREG, stat.S_IFDIR)
+                    or info.external_attr & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                raise ValueError(f"压缩包包含不安全路径或链接：{info.filename}")
+            entries.append((info, parts, name.endswith("/")))
+        tops = {parts[0] for _, parts, _ in entries}
+        strip = len(tops) == 1 and all(len(parts) > 1 or is_dir for _, parts, is_dir in entries)
+        targets = []
+        for info, parts, is_dir in entries:
+            parts = parts[1:] if strip else parts
+            out = dest
+            for part in parts:
+                out /= part
+                if out.is_symlink() or out.is_junction():
+                    raise ValueError(f"解压路径包含链接：{out}")
+            if (not out.resolve().is_relative_to(base)
+                    or out.is_file() and out.stat().st_nlink > 1):
+                raise ValueError(f"解压路径越界或为硬链接：{out}")
+            if parts and not is_dir:
+                targets.append((info, out))
+        # 所有条目通过校验后才开始写入，不能让排在后面的恶意条目留下半份产物。
+        for info, out in targets:
+            if (out.is_symlink() or out.is_junction() or not out.resolve().is_relative_to(base)
+                    or out.is_file() and out.stat().st_nlink > 1):
+                raise ValueError(f"解压路径发生变化：{out}")
             out.parent.mkdir(parents=True, exist_ok=True)
             with z.open(info) as s, open(out, "wb") as d:
                 shutil.copyfileobj(s, d)
@@ -132,13 +162,14 @@ def prewarm(stage: Path) -> list[str]:
         if res.get("fatal") or bad:
             raise SystemExit(f"导入工具失败：{res.get('fatal') or bad}")
     finally:
-        services.stop(state, "astrbot")
+        services.stop(state, "astrbot", layout=layout)
     return ["sk-build", "build-app", "build-token", *secrets.values()]
 
 
 def clean(stage: Path, needles: list[str]) -> None:
     data = stage / "astrbot" / "data"
-    (data / "cmd_config.json").unlink(missing_ok=True)
+    for name in ("cmd_config.json", "cmd_config.json.bak"):
+        (data / name).unlink(missing_ok=True)
     # -wal/-shm 是 SQLite 的伴生文件，里头留着还没并回主库的页，同样是预热期的数据
     for p in list(data.glob("*.db")) + list(data.glob("*.db-wal")) + list(data.glob("*.db-shm")):
         p.unlink()

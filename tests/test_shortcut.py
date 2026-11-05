@@ -35,9 +35,60 @@ class ShortcutTest(unittest.TestCase):
     def test_remove_deletes_lnk(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
+            lnk = shortcut.create_shortcut(d / "a.exe", f'--root "{d}"', "启动大肥鱼", d / "i.ico", desktop=d)
+            shortcut.remove_shortcut("启动大肥鱼", desktop=d, root=d)
+            self.assertFalse(lnk.exists())
+
+    def test_remove_preserves_shortcut_for_another_install(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            first, second = d / "first", d / "second"
+            lnk = shortcut.create_shortcut(second / "a.exe", f'--root "{second}"', "启动大肥鱼", d / "i.ico", desktop=d)
+            shortcut.remove_shortcut("启动大肥鱼", desktop=d, root=first)
+            self.assertTrue(lnk.exists())
+
+    def test_remove_preserves_unknown_ownership(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
             lnk = shortcut.create_shortcut(d / "a.exe", "", "启动大肥鱼", d / "i.ico", desktop=d)
             shortcut.remove_shortcut("启动大肥鱼", desktop=d)
-            self.assertFalse(lnk.exists())
+            self.assertTrue(lnk.exists())
+
+    def test_target_inside_install_cannot_override_another_root_argument(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            first, second = d / "first", d / "second"
+            lnk = shortcut.create_shortcut(first / "a.exe", f'--root "{second}"', "启动大肥鱼", d / "i.ico", desktop=d)
+            shortcut.remove_shortcut("启动大肥鱼", desktop=d, root=first)
+            self.assertTrue(lnk.exists())
+
+    def test_remove_preserves_unreadable_shortcut(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            lnk = d / "启动大肥鱼.lnk"
+            lnk.write_bytes(b"not a Windows shortcut")
+            shortcut.remove_shortcut("启动大肥鱼", desktop=d, root=d)
+            self.assertTrue(lnk.exists())
+
+    def test_quoted_text_is_not_an_install_root_argument(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            lnk = shortcut.create_shortcut(d / "a.exe", f'--note "text --root {d} tail"', "启动大肥鱼", d / "i.ico", desktop=d)
+            shortcut.remove_shortcut("启动大肥鱼", desktop=d, root=d)
+            self.assertTrue(lnk.exists())
+
+    def test_relative_root_is_not_resolved_using_uninstaller_cwd(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            target = d / "first" / "a.exe"
+            lnk = shortcut.create_shortcut(target, "--root .", "启动大肥鱼", d / "i.ico", desktop=d)
+            before = Path.cwd()
+            try:
+                os.chdir(d)
+                shortcut.remove_shortcut("启动大肥鱼", desktop=d, root=d)
+            finally:
+                os.chdir(before)
+            self.assertTrue(lnk.exists())
 
     def test_remove_missing_is_ok(self):
         with tempfile.TemporaryDirectory() as d:

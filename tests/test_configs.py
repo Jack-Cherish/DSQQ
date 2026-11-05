@@ -1,9 +1,11 @@
 import hashlib
 import json
+import os
 import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import configs
 
@@ -101,6 +103,53 @@ class ConfigsTest(unittest.TestCase):
         p = configs.pick_ports()
         self.assertEqual(set(p), {"dashboard", "onebot", "napcat_webui"})
         self.assertEqual(len(set(p.values())), 3)
+
+    def test_config_write_keeps_previous_valid_backup(self):
+        path = self.dir / "config.json"
+        configs._write(path, {"version": 1})
+        configs._write(path, {"version": 2})
+        configs._write(path, {"version": 3})
+        self.assertEqual(json.loads(path.read_text("utf-8")), {"version": 3})
+        self.assertEqual(json.loads(path.with_name("config.json.bak").read_text("utf-8")), {"version": 2})
+
+    def test_config_replace_failure_keeps_original_and_cleans_staging(self):
+        path = self.dir / "config.json"
+        configs._write(path, {"keep": "原配置"})
+        old = path.read_bytes()
+        with mock.patch.object(os, "replace", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                configs._write(path, {"new": True})
+        self.assertEqual(path.read_bytes(), old)
+        self.assertEqual(list(self.dir.iterdir()), [path])
+
+    def test_config_flush_failure_does_not_touch_original_or_backup(self):
+        path = self.dir / "config.json"
+        configs._write(path, {"version": 1})
+        configs._write(path, {"version": 2})
+        with mock.patch.object(os, "fsync", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                configs._write(path, {"version": 3})
+        self.assertEqual(json.loads(path.read_text("utf-8")), {"version": 2})
+        self.assertEqual(json.loads(path.with_name("config.json.bak").read_text("utf-8")), {"version": 1})
+        self.assertEqual({p.name for p in self.dir.iterdir()}, {"config.json", "config.json.bak"})
+
+    def test_config_final_replace_failure_keeps_current_and_backup(self):
+        path = self.dir / "config.json"
+        configs._write(path, {"version": 1})
+        configs._write(path, {"version": 2})
+        replace = os.replace
+
+        def fail_current(source, target):
+            if Path(target) == path:
+                raise OSError("disk failure")
+            return replace(source, target)
+
+        with mock.patch.object(os, "replace", side_effect=fail_current):
+            with self.assertRaises(OSError):
+                configs._write(path, {"version": 3})
+        self.assertEqual(json.loads(path.read_text("utf-8")), {"version": 2})
+        self.assertEqual(json.loads(path.with_name("config.json.bak").read_text("utf-8")), {"version": 2})
+        self.assertEqual({p.name for p in self.dir.iterdir()}, {"config.json", "config.json.bak"})
 
 
 if __name__ == "__main__":

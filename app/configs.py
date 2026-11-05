@@ -9,6 +9,7 @@ import string
 from pathlib import Path
 
 from checks import free_port
+from fileio import atomic_write_text
 
 DASHBOARD_USER = "dafeiyu"
 PLATFORM_ID = "dafeiyu"
@@ -51,8 +52,7 @@ def _read(path: Path) -> dict:
 
 
 def _write(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2), backup=True)
 
 
 def _upsert(items: list, item: dict) -> list:
@@ -65,7 +65,9 @@ def _upsert(items: list, item: dict) -> list:
     return items + [item]
 
 
-def write_astrbot_config(data_dir: Path, *, ports: dict, secrets: dict, deepseek_key: str) -> None:
+def write_astrbot_config(data_dir: Path, *, ports: dict, secrets: dict, deepseek_key: str,
+                         platform: str = "napcat", official_appid: str = "", official_secret: str = "",
+                         owner_openid: str = "") -> None:
     path = Path(data_dir) / "cmd_config.json"
     conf = _read(path)
     pbkdf2, md5 = hash_dashboard_password(secrets["dashboard_password"])
@@ -74,10 +76,25 @@ def write_astrbot_config(data_dir: Path, *, ports: dict, secrets: dict, deepseek
         "password_storage_upgraded": True, "password_change_required": False,
         "jwt_secret": secrets["jwt_secret"], "host": "127.0.0.1", "port": ports["dashboard"],
     })
-    conf["platform"] = _upsert(conf.get("platform", []), {
-        "id": PLATFORM_ID, "type": "aiocqhttp", "enable": True, "ws_reverse_host": "127.0.0.1",
-        "ws_reverse_port": ports["onebot"], "ws_reverse_token": secrets["onebot_token"],
-    })
+    if platform == "official":
+        adapter = {"id": PLATFORM_ID, "type": "qq_official", "enable": True, "appid": official_appid,
+                   "secret": official_secret, "enable_group_c2c": True, "enable_guild_direct_message": False}
+        owner_openid = owner_openid or "DAFEIYU_UNBOUND_OWNER"
+        ps = conf.setdefault("platform_settings", {})
+        ps["enable_id_white_list"] = True
+        whitelist = ps.setdefault("id_whitelist", [])
+        owner_session = f"{PLATFORM_ID}:FriendMessage:{owner_openid}"
+        if owner_session not in whitelist:
+            whitelist.append(owner_session)
+        admins = conf.setdefault("admins_id", [])
+        if owner_openid != "DAFEIYU_UNBOUND_OWNER" and owner_openid not in admins:
+            admins.append(owner_openid)
+    elif platform == "napcat":
+        adapter = {"id": PLATFORM_ID, "type": "aiocqhttp", "enable": True, "ws_reverse_host": "127.0.0.1",
+                   "ws_reverse_port": ports["onebot"], "ws_reverse_token": secrets["onebot_token"]}
+    else:
+        raise ValueError("不支持的 QQ 接入方式")
+    conf["platform"] = _upsert(conf.get("platform", []), adapter)
     conf["provider_sources"] = _upsert(conf.get("provider_sources", []), {
         "id": SOURCE_ID, "provider": "deepseek", "type": "openai_chat_completion",
         "provider_type": "chat_completion", "enable": True, "key": [deepseek_key],

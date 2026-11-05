@@ -64,6 +64,18 @@ class PathTest(unittest.TestCase):
             if str(d).isascii() and " " not in str(d):
                 self.assertIn("空间", checks.check_install_path(str(Path(d) / "a"), min_free_gb=10**9))
 
+    def test_existing_install_with_missing_state_can_reach_recovery(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            backup = root / 'state.json.bak'
+            backup.write_text('{}', encoding='utf-8')
+            self.assertIsNone(checks.check_install_path(d, min_free_gb=0))
+            backup.unlink()
+            config = root / 'astrbot' / 'data' / 'cmd_config.json'
+            config.parent.mkdir(parents=True)
+            config.write_text('{}', encoding='utf-8')
+            self.assertIsNone(checks.check_install_path(d, min_free_gb=0))
+
 
 class PortTest(unittest.TestCase):
     def test_free_port_skips_busy(self):

@@ -17,6 +17,34 @@ def wait_idle(inst, timeout=5):
 
 
 class InstallerTest(unittest.TestCase):
+    def test_cancel_wakes_waiting_step_and_prevents_later_start(self):
+        entered = threading.Event()
+        def waiting(ctx):
+            entered.set()
+            ctx.wait_for("keys")
+        inst = Installer(self.root, State.load(self.root), steps=[self.step("a", waiting), self.step("b")])
+        inst.start()
+        self.assertTrue(entered.wait(2))
+        self.assertTrue(inst.cancel(timeout=2))
+        self.assertEqual(self.ran, ["a"])
+        self.assertFalse(inst.progress()["running"])
+        self.assertFalse(inst.state.is_done("a"))
+
+    def test_cancel_interrupts_http_startup_wait(self):
+        import urllib.error
+        from unittest import mock
+        entered = threading.Event()
+        def waiting(ctx):
+            entered.set()
+            installer.services.wait_http("http://test", 300, interval=0.01,
+                                         opener=mock.Mock(side_effect=urllib.error.URLError("not ready")),
+                                         alive=lambda: ctx.check_cancelled() or True)
+        inst = Installer(self.root, State.load(self.root), steps=[self.step("a", waiting), self.step("b")])
+        inst.start()
+        self.assertTrue(entered.wait(2))
+        self.assertTrue(inst.cancel(timeout=2))
+        self.assertEqual(self.ran, ["a"])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -82,14 +110,30 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("ValueError", log)
         self.assertNotIn("sk-very-secret", log)
 
-    def test_missing_extract_output_resets_progress(self):
-        """解压产物被删掉后，不能再信 done 标记跳过解压，否则后面每步都失败且重试无效。"""
+    def test_missing_extract_output_preserves_progress_and_config(self):
+        """已有安装损坏时不能清空进度重跑解压，否则可能覆盖用户数据和密码。"""
         st = State.load(self.root)
         for k in ("extract", "ports", "configs"):
             st.mark_done(k)
         inst = Installer(self.root, st, steps=[self.step("extract"), self.step("ports")])
-        self.assertEqual([s["status"] for s in inst.progress()["steps"]], ["todo", "todo"])
-        self.assertEqual(State.load(self.root).data["done"], [])
+        self.assertEqual([s["status"] for s in inst.progress()["steps"]], ["done", "done"])
+        self.assertEqual(State.load(self.root).data["done"], ["extract", "ports", "configs"])
+
+    def test_extract_refuses_to_overwrite_existing_configuration(self):
+        from unittest import mock
+        boot = self.root / "boot"
+        boot.mkdir()
+        (boot / "payload.7z").write_bytes(b"payload")
+        (boot / "7zr.exe").write_bytes(b"extractor")
+        config = self.root / "astrbot" / "data" / "cmd_config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("keep", encoding="utf-8")
+        inst = Installer(self.root, State.load(self.root), steps=[], boot=boot)
+        with mock.patch.object(installer.subprocess, "run") as extract:
+            with self.assertRaises(InstallError):
+                installer.step_extract(installer.Ctx(inst))
+        extract.assert_not_called()
+        self.assertEqual(config.read_text("utf-8"), "keep")
 
     def test_intact_extract_output_keeps_progress(self):
         import personalize
@@ -142,8 +186,105 @@ class InstallerTest(unittest.TestCase):
         (boot / "app").mkdir(parents=True)
         (boot / "app" / "main.py").write_text("new", encoding="utf-8")
         (self.root / "app").mkdir()
+        (self.root / "app" / "main.py").write_text("old", encoding="utf-8")
         with mock.patch.object(installer.shutil, "copytree", side_effect=PermissionError("占用")):
-            self.assertFalse(installer.sync_app(self.root, boot))  # 同步失败不该让向导起不来
+            with self.assertRaises(InstallError):
+                installer.sync_app(self.root, boot)
+        self.assertEqual((self.root / "app" / "main.py").read_text("utf-8"), "old")
+
+    def test_sync_app_rolls_back_failed_directory_swap(self):
+        from unittest import mock
+        boot, dst = self.root / "boot", self.root / "app"
+        (boot / "app").mkdir(parents=True)
+        (boot / "app" / "main.py").write_text("new", encoding="utf-8")
+        dst.mkdir()
+        (dst / "main.py").write_text("old", encoding="utf-8")
+        replace = Path.replace
+
+        def fail_new_app(path, target):
+            if Path(target) == dst and path.name != "app.previous":
+                raise PermissionError("占用")
+            return replace(path, target)
+
+        with mock.patch.object(Path, "replace", fail_new_app):
+            with self.assertRaises(InstallError):
+                installer.sync_app(self.root, boot)
+        self.assertEqual((dst / "main.py").read_text("utf-8"), "old")
+
+    def test_sync_app_rejects_incomplete_staging(self):
+        from unittest import mock
+        boot, dst = self.root / "boot", self.root / "app"
+        (boot / "app").mkdir(parents=True)
+        (boot / "app" / "main.py").write_text("new", encoding="utf-8")
+        dst.mkdir()
+        (dst / "main.py").write_text("old", encoding="utf-8")
+
+        def incomplete_copy(source, target, **kwargs):
+            Path(target).mkdir()
+            (Path(target) / "main.py").write_text("partial", encoding="utf-8")
+
+        with mock.patch.object(installer.shutil, "copytree", side_effect=incomplete_copy):
+            with self.assertRaises(InstallError):
+                installer.sync_app(self.root, boot)
+        self.assertEqual((dst / "main.py").read_text("utf-8"), "old")
+
+    def test_sync_app_refuses_junction_destination(self):
+        import os
+        if os.name != "nt":
+            self.skipTest("Windows junction regression")
+        boot, outside, dst = self.root / "boot", self.root / "outside", self.root / "app"
+        (boot / "app").mkdir(parents=True)
+        (boot / "app" / "main.py").write_text("new", encoding="utf-8")
+        outside.mkdir()
+        (outside / "main.py").write_text("keep", encoding="utf-8")
+        installer.subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(outside)],
+                                 check=True, capture_output=True, creationflags=installer.services.CREATE_NO_WINDOW)
+        with self.assertRaises(InstallError):
+            installer.sync_app(self.root, boot)
+        self.assertEqual((outside / "main.py").read_text("utf-8"), "keep")
+        self.assertTrue(dst.is_junction())
+
+    def test_sync_app_preserves_backup_when_rollback_is_locked_and_recovers(self):
+        from unittest import mock
+        boot, dst = self.root / "boot", self.root / "app"
+        (boot / "app").mkdir(parents=True)
+        (boot / "app" / "main.py").write_text("new", encoding="utf-8")
+        dst.mkdir()
+        (dst / "main.py").write_text("old", encoding="utf-8")
+        replace = Path.replace
+
+        def lock_app(path, target):
+            if Path(target) == dst:
+                raise PermissionError("占用")
+            return replace(path, target)
+
+        with mock.patch.object(Path, "replace", lock_app):
+            with self.assertRaisesRegex(InstallError, "app.previous"):
+                installer.sync_app(self.root, boot)
+        backup = self.root / ".tmp" / "app.previous" / "main.py"
+        self.assertEqual(backup.read_text("utf-8"), "old")
+        with mock.patch.object(installer.shutil, "copytree", side_effect=OSError("copy failed")):
+            with self.assertRaises(InstallError):
+                installer.sync_app(self.root, boot)
+        self.assertEqual((dst / "main.py").read_text("utf-8"), "old")
+
+    def test_sync_app_refuses_nested_source_junction(self):
+        import os
+        if os.name != "nt":
+            self.skipTest("Windows junction regression")
+        boot, dst, outside = self.root / "boot", self.root / "app", self.root / "outside"
+        (boot / "app").mkdir(parents=True)
+        (boot / "app" / "main.py").write_text("new", encoding="utf-8")
+        dst.mkdir()
+        (dst / "main.py").write_text("old", encoding="utf-8")
+        outside.mkdir()
+        (outside / "private.txt").write_text("keep", encoding="utf-8")
+        installer.subprocess.run(["cmd", "/c", "mklink", "/J", str(boot / "app" / "link"), str(outside)],
+                                 check=True, capture_output=True, creationflags=installer.services.CREATE_NO_WINDOW)
+        with self.assertRaises(InstallError):
+            installer.sync_app(self.root, boot)
+        self.assertEqual((dst / "main.py").read_text("utf-8"), "old")
+        self.assertFalse((dst / "link").exists())
 
     def test_wait_for_blocks_until_provide(self):
         got = {}
@@ -177,8 +318,8 @@ class InstallerTest(unittest.TestCase):
         wait_idle(inst)
         self.assertEqual(self.ran, ["a"])
 
-    def run_import(self, result):
-        """用假的导入工具跑 step_import：subprocess.run 被替换成直接写结果文件。"""
+    def run_import(self, result, *, disabled_corrupt_optional=False):
+        """用假的导入工具写结果；真实管道脱敏由 test_log_capture 覆盖。"""
         import json
         import shutil
         from unittest import mock
@@ -188,20 +329,25 @@ class InstallerTest(unittest.TestCase):
         st.data.update(ports={"dashboard": 1, "onebot": 2, "napcat_webui": 3}, owner_qq="123")
         for k in ("dashboard_password", "siliconflow", "doubao_app_id", "doubao_token"):
             st.set_secret(k, f"secret-{k}")
+        if disabled_corrupt_optional:
+            st.data.update(memory="0", voice="0")
+            for k in ("siliconflow", "doubao_app_id", "doubao_token"):
+                st.data["secrets"][k] = "invalid-encrypted-value"
         seen = {}
 
-        def fake_run(argv, **kw):
+        def fake_run(name, argv, cwd, env, layout, state):
             a = json.loads(Path(argv[argv.index("--answers") + 1]).read_text("utf-8"))
             seen["answers"] = a
             seen["sf"] = Path(a["siliconflow_key_file"]).read_text("utf-8")
             if result is not None:
                 Path(argv[argv.index("--result-json") + 1]).write_text(json.dumps(result), "utf-8")
-            return mock.Mock(stdout="ok secret-siliconflow", stderr="")
+            installer.safe_logging.append_log(layout.logs / "import.log", "ok secret-siliconflow", secrets=state.secret_values(), root=self.root)
+            return mock.Mock(wait=mock.Mock(return_value=0))
 
         inst = Installer(self.root, st, steps=[])
         inst.provide("profile", {"name": "小鲸", "persona": "你是大肥鱼", "voice": "甜",
                                  "memes": {"blue-fat-fish-meme-pack": True}})
-        with mock.patch.object(installer, "ensure_astrbot"), mock.patch.object(installer.subprocess, "run", fake_run):
+        with mock.patch.object(installer, "ensure_astrbot"), mock.patch.object(installer.services, "logged_process", fake_run):
             try:
                 installer.step_import(installer.Ctx(inst))
                 err = None
@@ -214,10 +360,18 @@ class InstallerTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(seen["sf"], "secret-siliconflow")
         self.assertEqual(seen["answers"]["volc_app_id"], "secret-doubao_app_id")
-        self.assertFalse((self.root / ".import" / "s").exists())  # 放 key 的临时文件用完就删
+        self.assertFalse((self.root / ".tmp" / "import" / "s").exists())
+        self.assertFalse((self.root / ".tmp" / "import" / "answers.json").exists())
         log = (self.root / "logs" / "import.log").read_text("utf-8")
         self.assertNotIn("secret-siliconflow", log)
         self.assertTrue((self.root / "pack" / "persona" / "大肥鱼.md").read_text("utf-8").startswith("你是小鲸"))
+
+    def test_import_does_not_decrypt_disabled_optional_credentials(self):
+        err, seen = self.run_import({"fatal": None, "results": []}, disabled_corrupt_optional=True)
+        self.assertIsNone(err)
+        self.assertEqual(seen["answers"]["memory"], "0")
+        self.assertEqual(seen["answers"]["voice"], "0")
+        self.assertEqual(seen["sf"], "")
 
     def test_import_reports_failed_items(self):
         err, _ = self.run_import({"fatal": None, "results": [{"name": "人格", "ok": True},

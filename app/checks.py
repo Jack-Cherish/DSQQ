@@ -8,6 +8,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+QQ_ACCESS_TOKEN = "https://bots.qq.com/app/getAppAccessToken"
 DEEPSEEK_BALANCE = "https://api.deepseek.com/user/balance"
 SILICONFLOW_EMBED = "https://api.siliconflow.cn/v1/embeddings"
 DOUBAO_TTS = "https://openspeech.bytedance.com/api/v3/tts/create"
@@ -31,7 +32,8 @@ def check_install_path(path: str, min_free_gb: float = 10) -> str | None:
     if p.exists():
         if not p.is_dir():
             return "这是个文件，不是文件夹，换一个"
-        if any(p.iterdir()) and not (p / "state.json").exists():
+        known_install = any(marker.is_file() for marker in (p / "state.json", p / "state.json.bak", p / "astrbot" / "data" / "cmd_config.json"))
+        if any(child.name != ".controller.lock" for child in p.iterdir()) and not known_install:
             return "这个文件夹里已经有别的东西了，换一个空文件夹"
     probe = p
     while not probe.exists():
@@ -81,6 +83,19 @@ def _call(opener, url, *, headers=None, body=None, timeout=20):
         return status, json.loads(raw or b"{}")
     except ValueError:
         return status, {"raw": raw[:200].decode("utf-8", "replace")}
+
+
+def check_official(app_id: str, secret: str, opener=urllib.request.urlopen) -> tuple[bool, str]:
+    try:
+        status, data = _call(opener, QQ_ACCESS_TOKEN,
+                             body={"appId": app_id.strip(), "clientSecret": secret.strip()}, timeout=10)
+    except (urllib.error.URLError, OSError):
+        return False, "暂时连不上 QQ 平台，请检查网络后重试。原凭证未更改。"
+    if status == 401 or (isinstance(data, dict) and str(data.get("code")) == "100016"):
+        return False, "QQ 平台拒绝了凭证，请复制同一个机器人的 AppID 和最新 AppSecret。原凭证未更改。"
+    if status == 200 and isinstance(data, dict) and data.get("access_token") and data.get("expires_in"):
+        return True, "QQ 凭证验证通过"
+    return False, "QQ 平台暂未通过验证，请稍后重试或检查机器人权限。原凭证未更改。"
 
 
 def check_deepseek(key: str, opener=urllib.request.urlopen) -> tuple[bool, str]:

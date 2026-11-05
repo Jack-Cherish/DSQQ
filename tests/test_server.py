@@ -36,6 +36,11 @@ class FakeChecks:
         cls.calls.append(("doubao", app_id))
         return ("bad" not in app_id + token, "db", "QUJD")
 
+    @classmethod
+    def check_official(cls, app_id, secret):
+        cls.calls.append(("official", app_id))
+        return ("bad" not in app_id + secret, "请检查 AppSecret")
+
     check_install_path = staticmethod(lambda p: None if p.isascii() and " " not in p else "路径里不能有中文和空格")
     default_install_path = staticmethod(lambda: "D:\\DaFeiYu")
 
@@ -81,6 +86,14 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call("/api/info", token=False)[0], 403)
         self.assertEqual(self.call("/api/info")[0], 200)
 
+    def test_repair_is_offered_only_for_existing_installation_files(self):
+        self.assertFalse(self.call("/api/info")[1]["can_repair"])
+        root = Path(self.install_root())
+        self.app._open(root)
+        self.assertFalse(self.call("/api/info")[1]["can_repair"])
+        (root / "astrbot").mkdir(parents=True)
+        self.assertTrue(self.call("/api/info")[1]["can_repair"])
+
     def test_index_has_token(self):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/") as r:
             self.assertIn(self.app.token, r.read().decode("utf-8"))
@@ -100,6 +113,39 @@ class ServerTest(unittest.TestCase):
         self.assertIn("找不到配置包", r["message"])
         self.assertIn("wizard.log", r["message"])
         self.assertIn("找不到配置包", (self.home / "wizard.log").read_text(encoding="utf-8"))
+
+    def test_error_response_survives_unwritable_log(self):
+        with mock.patch.object(self.app, "pack_dir", side_effect=ValueError("bad pack")), \
+             mock.patch.object(self.app, "log_error", side_effect=PermissionError("log denied")):
+            status, result = self.call("/api/info")
+        self.assertEqual(status, 500)
+        self.assertIn("bad pack", result["message"])
+        self.assertIn("日志", result["message"])
+
+    def test_unsaved_key_in_exception_is_redacted_from_response_and_log(self):
+        self.app.root = Path(self.install_root())
+        self.app.state = State.load(self.app.root)
+        secret = "new-private-key-not-yet-saved"
+        with mock.patch.object(self.app.checks, 'check_deepseek', side_effect=ValueError('upstream rejected ' + secret)):
+            code, body = self.call('/api/check', {'field': 'deepseek', 'value': secret})
+        self.assertEqual(code, 500)
+        self.assertNotIn(secret, body['message'])
+        value = (self.app.root / 'logs' / 'installer.log').read_text(encoding='utf-8')
+        self.assertIn('ValueError', value)
+        self.assertNotIn(secret, value)
+
+    def test_recovery_allows_diagnostics_and_blocks_normal_mutations(self):
+        root = Path(self.install_root())
+        root.mkdir()
+        state_path = root / 'state.json'
+        state_path.write_text('{broken', encoding='utf-8')
+        self.app._open(root)
+        self.assertEqual(self.call('/api/info')[1]['mode'], 'recovery')
+        self.assertEqual(self.call('/api/diagnose')[0], 200)
+        for route in ('start', 'stop', 'keys', 'apply', 'uninstall', 'repair'):
+            self.assertEqual(self.call('/api/' + route, {})[0], 409)
+        self.assertEqual(state_path.read_text(encoding='utf-8'), '{broken')
+        self.assertFalse(self.call('/api/recover', {'action': 'restore_backup'})[1]['ok'])
 
     def test_path_endpoint_rejects_chinese(self):
         _, r = self.call("/api/path", {"path": "D:\\大肥鱼"})
@@ -194,6 +240,20 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(called, [1])
 
+    def test_qr_revision_rejects_an_outdated_image_request(self):
+        import hashlib
+        root = Path(self.install_root())
+        cache = root / "napcat-data" / "cache"
+        cache.mkdir(parents=True)
+        (cache / "qrcode.png").write_bytes(b"current-image")
+        self.app.root = root
+        code, _ = self.call("/api/qr?rev=outdated")
+        self.assertEqual(code, 409)
+        revision = hashlib.sha256(b"current-image").hexdigest()
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/qr?rev={revision}", headers={"X-Token": self.app.token})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            self.assertEqual(response.read(), b"current-image")
+
     def test_done_writes_info_file(self):
         root = Path(self.install_root())
         self.call("/api/path", {"path": str(root)})
@@ -283,7 +343,7 @@ class ServerTest(unittest.TestCase):
         other.data["pids"] = {"astrbot": 111, "napcat": 222}
         other.save()
         self.app.napcat().status = lambda: "online"
-        with mock.patch.object(server.services, "is_running", side_effect=lambda pid: pid in (111, 222)):
+        with mock.patch.object(server.services, "find_processes", return_value={"astrbot": [111], "napcat": [222]}):
             _, s = self.call("/api/status")
         self.assertTrue(s["astrbot"])
         self.assertTrue(s["napcat"])

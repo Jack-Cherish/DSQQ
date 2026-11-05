@@ -1,8 +1,10 @@
 import json
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import personalize
 
@@ -64,6 +66,31 @@ class PersonalizeTest(unittest.TestCase):
         p["name"] = "  "
         with self.assertRaises(ValueError):
             personalize.apply_profile(self.pack, p)
+
+    def test_profile_keeps_previous_persona_and_pack(self):
+        profile = personalize.default_profile(self.pack)
+        persona_path, pack_path = self.pack / personalize.PERSONA, self.pack / personalize.PACK_JSON
+        previous = {path: path.read_bytes() for path in (persona_path, pack_path)}
+        profile.update(name="小鲸", voice="温柔")
+        personalize.apply_profile(self.pack, profile)
+        for path, content in previous.items():
+            self.assertEqual(path.with_name(path.name + ".bak").read_bytes(), content)
+
+    def test_profile_replace_failure_keeps_valid_pack(self):
+        profile = personalize.default_profile(self.pack)
+        path = self.pack / personalize.PACK_JSON
+        previous = path.read_bytes()
+        replace = os.replace
+
+        def fail_pack(source, target):
+            if Path(target) == path:
+                raise OSError("disk failure")
+            return replace(source, target)
+
+        with mock.patch.object(os, "replace", side_effect=fail_pack):
+            with self.assertRaises(OSError):
+                personalize.apply_profile(self.pack, profile)
+        self.assertEqual(path.read_bytes(), previous)
 
     def test_answers_have_no_plain_secrets(self):
         sec = Path(self.tmp.name) / "sec"
