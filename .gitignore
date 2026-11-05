@@ -1,8 +1,38 @@
+# 打包产物：exe 发到 GitHub Release，不进仓库
+dist/
+*.exe
+
+# 打包时下载的组件和中间文件（build/build.py）
 downloads/
 .tmp/
-dist/
+
+# Python
 .venv/
+venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node（tests/test_web.cjs 只用内置模块，以防万一）
+node_modules/
+
+# 本地运行留下的东西
+*.log
+.env
+.env.*
+
+# 编辑器和 AI 工具的本地文件
+.vscode/
+.idea/
 .superpowers/
+docs/superpowers/
+.claude/settings.local.json
+
+# 系统文件
 .DS_Store
+Thumbs.db
+desktop.ini
